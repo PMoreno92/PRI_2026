@@ -66,16 +66,16 @@ server <- function(input, output) {
            "ccpl" = ccpl)})
   
   # Add the palettes
-  pal_TD <- colorNumeric(palette = c("#FFFFFF", "#0058A1"), domain = TD)
-  pal_PD <- colorNumeric(palette = c("#FFFFFF", "#B80007"), domain = selectedRaster$PD)
-  pal_FD <- colorNumeric(palette = c("#FFFFFF", "#591f63"), domain = selectedRaster$FD)
-  pal_connectance <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$connectance)
-  pal_compdiv <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$compdiv)
-  pal_cc <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$cc)
-  pal_NODF <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$NODF)
-  pal_H2 <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$H2)
-  pal_cchb <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$cchb)
-  pal_ccpl <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$ccpl)
+  #pal_TD <- colorNumeric(palette = c("#FFFFFF", "#0058A1"), domain = TD)
+  #pal_PD <- colorNumeric(palette = c("#FFFFFF", "#B80007"), domain = selectedRaster$PD)
+  #pal_FD <- colorNumeric(palette = c("#FFFFFF", "#591f63"), domain = selectedRaster$FD)
+  #pal_connectance <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$connectance)
+  #pal_compdiv <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$compdiv)
+  #pal_cc <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$cc)
+  #pal_NODF <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$NODF)
+  #pal_H2 <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$H2)
+  #pal_cchb <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$cchb)
+  #pal_ccpl <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$ccpl)
   
   
   observeEvent(input$map_click, {
