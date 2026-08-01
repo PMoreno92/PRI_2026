@@ -36,6 +36,7 @@ hb_df$hbSpecies = gsub("Amazilia_versicolor", "Chrysuronia_versicolor", hb_df$hb
 hb_df$hbSpecies = gsub("Amazilia_violiceps", "Ramosomyia_violiceps", hb_df$hbSpecies)
 hb_df$hbSpecies = gsub("Calliphlox_bryantae", "Philodice_bryantae", hb_df$hbSpecies)
 hb_df$hbSpecies = gsub("Calliphlox_mitchellii", "Philodice_mitchellii", hb_df$hbSpecies)
+hb_df$hbSpecies = gsub("Chrysuronia_boucardi", "Amazilia_boucardi", hb_df$hbSpecies)
 hb_df$hbSpecies = gsub("Hylocharis_cyanus", "Chlorestes_cyanus", hb_df$hbSpecies)
 hb_df$hbSpecies = gsub("Hylocharis_eliciae", "Chlorestes_eliciae", hb_df$hbSpecies)
 hb_df$hbSpecies = gsub("Lampornis_cinereicauda", "Lampornis_castaneoventris", hb_df$hbSpecies)
@@ -104,7 +105,7 @@ plot(selelev_mean_EEA)
 
 hb_df = cbind(hb_df,
                get_nth_cell_xy(coord_df = hb_df[,c("decimalLongitude","decimalLatitude")], 
-                                   ras_file = seltemp_mean_EEA))|>
+                                   ras_file = selelev_mean_EEA))|>
   as.data.frame()
 
 

@@ -1,9 +1,7 @@
 #
-# This is a Shiny web application. You can run the application by clicking
-# the 'Run App' button above.
+# Shiny web application — Hummingbird biodiversity maps (Americas)
 #
 # Find out more about building applications with Shiny here:
-#
 #    https://shiny.posit.co/
 #
 
@@ -13,127 +11,422 @@ library(leaflet)
 library(raster)
 library(terra)
 library(ggplot2)
+library(ape)             # phylogenetic tree handling / plotting
+library(bipartite)       # hummingbird-plant interaction network plot
+library(aws.s3)          # S3-compatible client, used here against Cloudflare R2
+library(arrow)           # reads the Parquet version of the photo/interaction data
 
+# ---- R2 (Cloudflare) connection --------------------------------------------
+# Credentials are read from environment variables:
+#   - Locally: set in ~/.Renviron (never committed to git)
+#   - On Posit Connect: set as environment variables on the deployed app
+r2_key    <- Sys.getenv("AWS_ACCESS_KEY_ID")
+r2_secret <- Sys.getenv("AWS_SECRET_ACCESS_KEY")
+r2_base   <- "91a6e033360b81fa6d1f2bd942507685.r2.cloudflarestorage.com"
+r2_bucket <- "pri-2026-hb-data"
+
+if (r2_key == "" || r2_secret == "") {
+  stop("AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY are not set. ",
+       "Set them in ~/.Renviron locally, or as environment variables on Posit Connect.")
+}
+
+# ---- Paths ------------------------------------------------------------
+# app.R lives inside the MapHB subfolder, one level below the project
+# root (which contains `results/`). Rather than assuming the working
+# directory is always MapHB (true for "Run App" and Posit Connect, but
+# NOT true if someone runs source("MapHB/app.R") from one level up), we
+# search upward from the current working directory for a folder that
+# actually contains "results/hb_ptree.txt" -- a small file we know must
+# exist at the project root. This makes path resolution independent of
+# how/from-where the app happens to be launched.
+find_project_root <- function(marker = file.path("results", "hb_ptree.txt"),
+                              max_levels = 6) {
+  dir <- normalizePath(getwd(), mustWork = TRUE)
+  for (i in seq_len(max_levels)) {
+    if (file.exists(file.path(dir, marker))) return(dir)
+    parent <- dirname(dir)
+    if (parent == dir) break  # reached filesystem root, stop
+    dir <- parent
+  }
+  stop("Could not locate project root (folder containing '", marker,
+       "') by searching upward from ", getwd(), ". ",
+       "Check that the app is being run from within the project folder tree.")
+}
+
+project_root <- find_project_root()
+message("app.R working dir: ", getwd())
+message("Resolved project root: ", project_root)
+
+# Local cache directory for files pulled from R2. Downloads only happen once
+# per app instance -- subsequent app restarts on the same machine/container
+# reuse the cached copy instead of re-downloading from R2 every time.
+cache_dir <- file.path(project_root, "results_cache")
+dir.create(cache_dir, showWarnings = FALSE, recursive = TRUE)
+message("Cache dir resolves to: ", cache_dir)
+
+# Downloads `object_key` from the R2 bucket into cache_dir, unless it's
+# already been downloaded, and returns the local path to use with rast()/
+# read_parquet()/etc.
+#
+# NOTE: uses get_object() + writeBin() rather than aws.s3::save_object().
+# save_object() routes its response through internal parsing helpers that
+# can misfire on larger binary payloads (observed failing specifically on
+# a ~7.9 MB file while smaller ~450 KB files succeeded, with an unrelated
+# -looking error thrown from path_to_connection()). get_object() returns
+# the raw bytes directly with no such parsing step, so we write them to
+# disk ourselves -- simpler and size-independent.
+fetch_from_r2 <- function(object_key) {
+  local_path <- file.path(cache_dir, object_key)
+  if (!file.exists(local_path)) {
+    message("Downloading from R2: ", object_key)
+    raw_bytes <- get_object(
+      object   = object_key,
+      bucket   = r2_bucket,
+      key      = r2_key,
+      secret   = r2_secret,
+      region   = "",
+      base_url = r2_base,
+      use_https = TRUE,
+      check_region = FALSE
+    )
+    writeBin(raw_bytes, local_path)
+  }
+  local_path
+}
+
+# ---- Extent (Americas) -------------------------------------------------
 americas <- ext(-170, -30, -60, 85)
 
-TD = crop(rast("../results/hb_raster_qTD_est95_wgs84.tiff"), americas)
-PD = crop(rast("../results/hb_raster_qPD_3S_est95_wgs84.tiff"), americas)
-FD = crop(rast("../results/hb_raster_qFD_3S_est95_wgs84.tiff"), americas)
-connectance = crop(rast("../results/hb_80_raster_connectance_5S_wgs84.tiff"), americas)
-compdiv = crop(rast("../results/hb_80_raster_compdiv_5S_wgs84.tiff"), americas)
-cc = crop(rast("../results/hb_80_raster_cc_5S_wgs84.tiff"), americas)
-NODF = crop(rast("../results/hb_80_raster_NODF_5S_wgs84.tiff"), americas)
-H2 = crop(rast("../results/hb_80_raster_H2_5S_wgs84.tiff"), americas)
-cchb = crop(rast("../results/hb_80_raster_cchb_5S_wgs84.tiff"), americas)
-ccpl = crop(rast("../results/hb_80_raster_ccpl_5S_wgs84.tiff"), americas)
-selelev_mean = crop(rast("../results/selelev_mean.tiff"), americas)
+# ---- Load & crop rasters (now pulled from R2, cached locally) -------------
+# Loads one raster from R2 with clear diagnostics if anything goes wrong,
+# instead of a bare rast()/crop() call whose error message doesn't say
+# which file was responsible.
+load_raster <- function(object_key) {
+  local_path <- fetch_from_r2(object_key)
+  if (!file.exists(local_path)) {
+    stop("Downloaded file is missing on disk: ", local_path)
+  }
+  sz <- file.info(local_path)$size
+  message("  -> ", object_key, " (", sz, " bytes) at ", local_path)
+  r <- tryCatch(
+    rast(local_path),
+    error = function(e) {
+      stop("Failed to open '", object_key, "' at '", local_path,
+           "' with terra::rast(): ", conditionMessage(e))
+    }
+  )
+  crop(r, americas)
+}
 
-# Define UI for application that draws a histogram
+TD           <- load_raster("hb_raster_qTD_est95_wgs84.tiff")
+PD           <- load_raster("hb_raster_qPD_3S_est95_wgs84.tiff")
+FD           <- load_raster("hb_raster_qFD_3S_est95_wgs84.tiff")
+connectance  <- load_raster("hb_80_raster_connectance_5S_wgs84.tiff")
+compdiv      <- load_raster("hb_80_raster_compdiv_5S_wgs84.tiff")
+cc           <- load_raster("hb_80_raster_cc_5S_wgs84.tiff")
+NODF         <- load_raster("hb_80_raster_NODF_5S_wgs84.tiff")
+H2           <- load_raster("hb_80_raster_H2_5S_wgs84.tiff")
+cchb         <- load_raster("hb_80_raster_cchb_5S_wgs84.tiff")
+ccpl         <- load_raster("hb_80_raster_ccpl_5S_wgs84.tiff")
+selelev_mean <- load_raster("selelev_mean.tiff")
+
+message("All 11 rasters loaded and cropped successfully.")
+
+# ---- Photo / interaction data ---------------------------------------------
+# Now stored as Parquet on R2 (smaller + faster than the raw CSV) instead of
+# results/hb_df.csv. Still cached to .rds after the first parse per app
+# instance, same as before -- delete hb_photos_cache.rds if the source
+# Parquet file on R2 is ever updated.
+photos_cache_path <- file.path(project_root, "results", "hb_photos_cache.rds")
+dir.create(dirname(photos_cache_path), showWarnings = FALSE, recursive = TRUE)
+
+if (file.exists(photos_cache_path)) {
+  cached <- readRDS(photos_cache_path)
+  photos        <- cached$photos
+  photos_unique <- cached$photos_unique
+} else {
+  photos <- as.data.frame(arrow::read_parquet(fetch_from_r2("hb_df.parquet")))
+  
+  # Assign each photo row to a cell using the SAME grid as the biodiversity
+  # rasters (rather than the dataframe's own `nth_cell`, which was built in a
+  # different, unknown projected CRS). This guarantees the map click and the
+  # photo data always refer to the same cell.
+  photos$cell_id <- terra::cellFromXY(TD, cbind(photos$decimalLongitude, photos$decimalLatitude))
+  
+  # Pull the correct photo URL out of the (possibly multi-URL) `identifier`
+  # field, using the trailing "_N" in imageFileName as the index into it.
+  get_photo_url <- function(identifier, imageFileName) {
+    urls <- trimws(strsplit(identifier, ";")[[1]])
+    idx  <- suppressWarnings(as.integer(sub(".*_(\\d+)\\.[a-zA-Z]+$", "\\1", imageFileName)))
+    if (is.na(idx) || idx < 1 || idx > length(urls)) urls[1] else urls[idx]
+  }
+  photos$photo_url <- mapply(get_photo_url, photos$identifier, photos$imageFileName)
+  
+  # One marker per unique photo (a photo can appear multiple times if several
+  # candidate plant IDs were scored against it).
+  photos_unique <- photos[!duplicated(photos$imageFileName), ]
+  
+  saveRDS(list(photos = photos, photos_unique = photos_unique), photos_cache_path)
+}
+
+# ---- Phylogenetic tree (hummingbirds) -------------------------------------
+# Small text file -- left in git as-is, not moved to R2.
+hb_tree <- ape::read.tree(file.path(project_root, "results", "hb_ptree.txt"))
+
+# ---- Raster registry (name -> raster object) -----------------------------
+raster_list <- list(
+  TD = TD, PD = PD, FD = FD,
+  connectance = connectance, NODF = NODF, H2 = H2
+)
+
+# Variables shown in the click-popup summary table, in this order.
+# Filtered against names(raster_list) so that trimming/renaming the raster
+# registry above can never again point the click handler at a raster that
+# doesn't exist (this was the cause of the "x = NULL" extract() error).
+popup_vars <- intersect(c("TD", "PD", "FD", "connectance", "NODF", "H2", "cc"),
+                        names(raster_list))
+
+popup_labels <- c(
+  TD = "Taxonomic Diversity", PD = "Phylogenetic Diversity", FD = "Functional Diversity",
+  connectance = "Connectance", NODF = "NODF", H2 = "H2", cc = "Cluster Coefficient"
+)
+
+# ---- Color palettes (edit hex codes / add entries as needed) -------------
+palette_colors <- list(
+  TD          = c("#FFFFFF", "#0073D1"),  # white -> blue
+  PD          = c("#FFFFFF", "#CC002B"),  # white -> coral red
+  FD          = c("#FFFFFF", "#E89E00"),  # white -> yellow
+  connectance = c("#FFFFFF", "#009180"),  # white -> turquoise green
+  NODF        = c("#FFFFFF", "#B51AFF"),  # white -> purple
+  H2          = c("#FFFFFF", "#FF571F")   # white -> orange
+)
+
+# Precompute one colorNumeric palette function per variable (built once,
+# from the actual cell values, not from the raster object itself).
+palettes <- lapply(names(raster_list), function(v) {
+  vals <- values(raster_list[[v]], na.rm = TRUE)
+  colorNumeric(palette = palette_colors[[v]], domain = vals, na.color = "transparent")
+})
+names(palettes) <- names(raster_list)
+
+variable_choices <- list(
+  "Taxonomic Diversity (SC = 95 %)"                    = "TD",
+  "Phylogenetic Diversity (SC = 95 %)"                 = "PD",
+  "Functional Diversity (SC = 95 %)"                   = "FD",
+  "Network: connectance"                               = "connectance",
+  "Network: NODF"                                      = "NODF",
+  "Network: H2"                                        = "H2"
+)
+
+# ---- UI -------------------------------------------------------------------
 ui <- dashboardPage(
   dashboardHeader(disable = TRUE),
-  dashboardSidebar(radioButtons("variable", "Select Variable", 
-                                choices = list("Taxonomic Diversity (SC = 95 %)" = "TD",
-                                               "Phylogenetic Diversity (SC = 95 %)" = "PD",
-                                               "Functional Diversity (SC = 95 %)" = "FD",
-                                               "Network: connectance" = "connectance",
-                                               "Network: compartment diversity" = "compdiv",
-                                               "Network: cluster coefficient" = "cc",
-                                               "Network: NODF" = "NODF",
-                                               "Network: H2" = "H2",
-                                               "Network: cluster coefficient (hummingbirds)" = "cchb",
-                                               "Network: cluster coefficient (plants)" = "ccpl"))),
-  
-  dashboardBody(leafletOutput(outputId = "map")),
+  dashboardSidebar(
+    radioButtons("variable", "Select Variable", choices = variable_choices)
+  ),
+  dashboardBody(
+    leafletOutput(outputId = "map", height = 600),
+    br(),
+    fluidRow(
+      column(4,
+             h4("Values at last clicked pixel"),
+             tableOutput("clickTable")
+      ),
+      column(4,
+             h4("Hummingbird subtree (this cell)"),
+             plotOutput("phyloPlot", height = 350)
+      ),
+      column(4,
+             h4("Hummingbird - plant network (this cell)"),
+             plotOutput("networkPlot", height = 350)
+      )
+    )
+  ),
   title = "Interactive Maps"
 )
 
-# Define server logic required to draw a histogram
-server <- function(input, output) {
+# ---- Server -----------------------------------------------------------
+server <- function(input, output, session) {
   
-  # Map selection (for biological variables)
-  ## Add the options
   selectedRaster <- reactive({
-    switch(input$variable,
-           "TD" = TD,
-           "PD" = PD,
-           "FD" = FD,
-           "connectance" = connectance,
-           "compdiv" = compdiv,
-           "cc" = cc,
-           "NODF" = NODF,
-           "H2" = H2,
-           "cchb" = cchb,
-           "ccpl" = ccpl)})
+    req(input$variable)
+    raster_list[[input$variable]]
+  })
   
-  # Add the palettes
-  #pal_TD <- colorNumeric(palette = c("#FFFFFF", "#0058A1"), domain = TD)
-  #pal_PD <- colorNumeric(palette = c("#FFFFFF", "#B80007"), domain = selectedRaster$PD)
-  #pal_FD <- colorNumeric(palette = c("#FFFFFF", "#591f63"), domain = selectedRaster$FD)
-  #pal_connectance <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$connectance)
-  #pal_compdiv <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$compdiv)
-  #pal_cc <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$cc)
-  #pal_NODF <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$NODF)
-  #pal_H2 <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$H2)
-  #pal_cchb <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$cchb)
-  #pal_ccpl <- colorNumeric(palette = c("#FFFFFF", "#009590"), domain = selectedRaster$ccpl)
+  selectedPal <- reactive({
+    req(input$variable)
+    palettes[[input$variable]]
+  })
   
+  # Stores the values of ALL variables at the last clicked point
+  clickValues <- reactiveVal(NULL)
   
-  observeEvent(input$map_click, {
-    click <- input$map_click
-    pt <- terra::vect(matrix(c(click$lng, click$lat), ncol = 2),
-                      type = "points", crs = "EPSG:4326")
-    value <- terra::extract(selectedRaster(), pt)[1,2]
+  # Stores the photo rows belonging to the last clicked cell
+  clickCellPhotos <- reactiveVal(NULL)
+  
+  # Tracks whether the (expensive) photo layer has been added yet, so we
+  # only build it once per session -- the first time the user turns it on.
+  photosLoaded <- reactiveVal(FALSE)
+  
+  observeEvent(input$map_groups, {
+    if ("Photos" %in% input$map_groups && !photosLoaded()) {
+      leafletProxy("map") |>
+        addCircleMarkers(
+          data = photos_unique,
+          lng = ~decimalLongitude, lat = ~decimalLatitude,
+          radius = 4, stroke = FALSE, fillOpacity = 0.6, fillColor = "#CC002B",
+          clusterOptions = markerClusterOptions(),
+          group = "Photos",
+          layerId = ~imageFileName  # used to look up the row on click, below
+        )
+      photosLoaded(TRUE)
+    }
+  })
+  
+  # Popup content is only ever built for the ONE marker that was clicked,
+  # not pre-built for all ~150K+ markers up front.
+  observeEvent(input$map_marker_click, {
+    click <- input$map_marker_click
+    req(click$id)
+    row <- photos_unique[photos_unique$imageFileName == click$id, ][1, ]
+    req(nrow(row) == 1)
+    
+    popup_html <- paste0(
+      "<img src='", row$photo_url, "' width='150'><br/>",
+      "<b>", gsub("_", " ", row$hbSpecies), "</b><br/>",
+      "on <i>", row$speciesPlant, "</i><br/>",
+      "<a href='", row$photo_url, "' target='_blank'>Open full image</a>"
+    )
     
     leafletProxy("map") |>
-      clearPopups() |>
-      addPopups(lng = click$lng, lat = click$lat,
-                popup = paste0("<b>Value:</b> ", round(value, 3)))})
+      addPopups(lng = click$lng, lat = click$lat, popup = popup_html)
+  })
   
+  # ---- Static map: built ONCE. Do not put input$variable-dependent
+  # content here, or the whole map (and its zoom/pan state) gets rebuilt
+  # every time the user changes layers.
   output$map <- renderLeaflet({
-    
     leaflet(options = leafletOptions(worldCopyJump = FALSE)) |>
       addProviderTiles(providers$CartoDB.Positron,
                        options = providerTileOptions(noWrap = TRUE)) |>
       
-    # NASA FIRMS (active fires)
-    addWMSTiles(baseUrl = "https://firms.modaps.eosdis.nasa.gov/mapserver/wms",
-      layers = "fires_viirs_snpp_24",
-      options = WMSTileOptions(format = "image/png",
-                               transparent = TRUE),
-      attribution = "NASA FIRMS",
-      group = "NASA FIRMS (24 h)") |>
+      # NASA FIRMS (active fires)
+      addWMSTiles(baseUrl = "https://firms.modaps.eosdis.nasa.gov/mapserver/wms",
+                  layers = "fires_viirs_snpp_24",
+                  options = WMSTileOptions(format = "image/png", transparent = TRUE),
+                  attribution = "NASA FIRMS", group = "NASA FIRMS (24 h)") |>
       
-    # NDVI
-    addWMSTiles(baseUrl = "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi",
-                layers = "MODIS_Terra_NDVI_8Day",
-                options = WMSTileOptions(format = "image/png",
-                                         transparent = TRUE),
-                attribution = "NASA GIBS", group = "NDVI") |>
-    
-    # CSIC SPEI
-    addWMSTiles(baseUrl = "https://spei.csic.es/geoserver/SPEI/wms",
-                layers = "spei_latest",
-                options = WMSTileOptions(format = "image/png",
-                                         transparent = TRUE),
-                attribution = "CSIC SPEI", group = "SPEI") |>
+      # NDVI
+      addWMSTiles(baseUrl = "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi",
+                  layers = "MODIS_Terra_NDVI_8Day",
+                  options = WMSTileOptions(format = "image/png", transparent = TRUE),
+                  attribution = "NASA GIBS", group = "NDVI") |>
       
-      # Biodiversity raster
-      addRasterImage(selectedRaster(),
-                     group = "Selected raster") |>
+      # CSIC SPEI
+      addWMSTiles(baseUrl = "https://spei.csic.es/geoserver/SPEI/wms",
+                  layers = "spei_latest",
+                  options = WMSTileOptions(format = "image/png", transparent = TRUE),
+                  attribution = "CSIC SPEI", group = "SPEI") |>
       
-      addLayersControl(overlayGroups = c("Selected raster", "NASA FIRMS (24 h)",
-                                         "NDVI","SPEI"),
-                       options = layersControlOptions(collapsed = FALSE)) |>
+      addLayersControl(
+        overlayGroups = c("Selected raster", "Photos",
+                          "NASA FIRMS (24 h)", "NDVI", "SPEI"),
+        options = layersControlOptions(collapsed = FALSE)
+      ) |>
       
-      addLegend(position = "bottomright", opacity = 1)
-      
-      fitBounds(-170, -60, -30, 85)
-    
-    
+      # Restrict panning/zooming to the Americas
+      setMaxBounds(lng1 = -170, lat1 = -60, lng2 = -30, lat2 = 85) |>
+      fitBounds(lng1 = -170, lat1 = -60, lng2 = -30, lat2 = 85)
   })
   
+  # ---- Dynamic layer: runs on every variable change, but only touches
+  # the raster + legend, leaving the user's current pan/zoom untouched.
+  observeEvent(input$variable, {
+    pal <- selectedPal()
+    r   <- selectedRaster()
+    
+    leafletProxy("map") |>
+      clearGroup("Selected raster") |>
+      clearControls() |>
+      addRasterImage(r, colors = pal, opacity = 0.8, group = "Selected raster",
+                     project = TRUE) |>
+      addLegend(position = "bottomright", pal = pal, values = values(r, na.rm = TRUE),
+                title = names(which(variable_choices == input$variable)))
+  }, ignoreNULL = TRUE)
+  
+  # ---- Click handler: extract ALL popup_vars at the clicked point ---------
+  observeEvent(input$map_click, {
+    click <- input$map_click
+    pt <- terra::vect(matrix(c(click$lng, click$lat), ncol = 2),
+                      type = "points", crs = "EPSG:4326")
+    
+    vals <- sapply(popup_vars, function(v) {
+      out <- terra::extract(raster_list[[v]], pt)[1, 2]
+      if (is.null(out) || length(out) == 0) NA else round(out, 3)
+    })
+    
+    clickValues(data.frame(
+      Variable = popup_labels[popup_vars],
+      Value = vals,
+      row.names = NULL
+    ))
+    
+    popup_html <- paste0(
+      "<b>", popup_labels[popup_vars], ":</b> ", vals, collapse = "<br/>"
+    )
+    
+    leafletProxy("map") |>
+      clearPopups() |>
+      addPopups(lng = click$lng, lat = click$lat, popup = popup_html)
+    
+    # Same grid used to build the photo layer's cell_id, so this always
+    # matches whatever cell the user just clicked.
+    cell_id <- terra::cellFromXY(TD, cbind(click$lng, click$lat))
+    clickCellPhotos(photos[!is.na(photos$cell_id) & photos$cell_id == cell_id, ])
+  })
+  
+  output$clickTable <- renderTable({
+    req(clickValues())
+    clickValues()
+  })
+  
+  # ---- Phylogenetic subtree for species observed in the clicked cell ------
+  output$phyloPlot <- renderPlot({
+    cellData <- clickCellPhotos()
+    req(cellData)
+    
+    species_here <- intersect(unique(cellData$hbSpecies), hb_tree$tip.label)
+    
+    if (length(species_here) == 0) {
+      plot.new()
+      text(0.5, 0.5, "No hummingbird species recorded in this cell")
+    } else if (length(species_here) == 1) {
+      plot.new()
+      text(0.5, 0.5, gsub("_", " ", species_here))
+    } else {
+      subtree <- ape::keep.tip(hb_tree, species_here)
+      plot(subtree, main = NULL, cex = 0.9)
+    }
+  })
+  
+  # ---- Bipartite hummingbird-plant network for the clicked cell -----------
+  output$networkPlot <- renderPlot({
+    cellData <- clickCellPhotos()
+    req(cellData)
+    
+    edges <- cellData[cellData$scorePlant > 0.8, c("hbSpecies", "speciesPlant")]
+    
+    if (nrow(edges) == 0) {
+      plot.new()
+      text(0.5, 0.5, "No high-confidence interactions (score > 0.8) in this cell")
+    } else {
+      web <- table(edges$hbSpecies, edges$speciesPlant)
+      bipartite::plotweb(web, method = "normal",
+                         col.high = "#00246B", col.low = "#009180",
+                         text.rot = 90)
+    }
+  })
 }
 
-
-# Run the application 
+# ---- Run ------------------------------------------------------------------
 shinyApp(ui = ui, server = server)
