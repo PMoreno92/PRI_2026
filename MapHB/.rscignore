@@ -1,0 +1,6 @@
+.Rprofile
+renv/activate.R
+renv/library/
+renv/local/
+renv/staging/
+renv/sandbox/

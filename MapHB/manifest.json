@@ -3049,9 +3049,6 @@
     ".renvignore": {
       "checksum": "30bb4cf1b8fff7f254a7d6a592a3acea"
     },
-    ".Rprofile": {
-      "checksum": "72176613a784a01fbec2dbac6c9c9075"
-    },
     "app.R": {
       "checksum": "1d52495974664d5a46c38501ca767b04"
     },
