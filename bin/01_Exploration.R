@@ -621,3 +621,51 @@ ggplot() +
   geom_spatvector(data = whem_sf_EEA) +
   geom_raster(data = hb_80_allvars_5S[hb_80_allvars_5S$variable == "qTD",],
               aes(x = cell_long, y = cell_lat, fill = value))
+
+# Environmental variables ----
+download.file(
+  "https://geodata.ucdavis.edu/climate/worldclim/2_1/base/wc2.1_2.5m_bio.zip",
+  destfile = "results/wc2.1_2.5m_bio.zip"
+)
+unzip("results/wc2.1_2.5m_bio.zip", exdir = "results/worldclim_bio")
+
+temp_raw   <- rast("results/worldclim_bio/wc2.1_2.5m_bio_1.tif")   # Annual Mean Temp
+precip_raw <- rast("results/worldclim_bio/wc2.1_2.5m_bio_12.tif")  # Annual Precip
+
+TD <- rast("results/hb_raster_qTD_est95_wgs84.tiff")  # your reference grid
+
+temp_aligned   <- resample(crop(temp_raw, ext(TD)), TD, method = "bilinear")
+precip_aligned <- resample(crop(precip_raw, ext(TD)), TD, method = "bilinear")
+
+writeRaster(temp_aligned,   "results/env_temp_mean_wgs84.tiff",   overwrite = TRUE)
+writeRaster(precip_aligned, "results/env_precip_mean_wgs84.tiff", overwrite = TRUE)
+
+# SPEIbase v2.9/2.10, 12-month SPEI, monthly global 0.5° grid, 1901-2024
+download.file(
+  "https://spei.csic.es/spei_database/nc/spei12.nc",
+  destfile = "results/spei12.nc"
+)
+
+spei_stack <- rast("results/spei12.nc")
+
+# Layer names are dates -- subset to Jan 2015 - Dec 2024, then average
+dates <- time(spei_stack)
+idx <- which(dates >= as.Date("2015-01-01") & dates <= as.Date("2024-12-31"))
+spei_mean_raw <- mean(spei_stack[[idx]], na.rm = TRUE)
+
+spei_aligned <- resample(crop(spei_mean_raw, ext(TD)), TD, method = "bilinear")
+writeRaster(spei_aligned, "results/env_spei_mean_wgs84.tiff", overwrite = TRUE)
+
+# Population 
+download.file(
+  "https://jeodpp.jrc.ec.europa.eu/ftp/jrc-opendata/GHSL/GHS_POP_GLOBE_R2023A/GHS_POP_E2020_GLOBE_R2023A_4326_30ss/V1-0/GHS_POP_E2020_GLOBE_R2023A_4326_30ss_V1_0.zip",
+  destfile = "results/GHS_pop_2020.zip"
+)
+unzip("results/GHS_pop_2020.zip", exdir = "results/ghs_population2020")
+
+pop_raw   <- rast("results/ghs_population2020/GHS_POP_E2020_GLOBE_R2023A_4326_30ss_V1_0.tif")  
+
+
+pop_aligned   <- resample(crop(pop_raw, ext(TD)), TD, method = "bilinear")
+
+writeRaster(pop_aligned,   "results/pop_2020_wgs84.tiff",   overwrite = TRUE)

@@ -228,17 +228,26 @@ ui <- dashboardPage(
     leafletOutput(outputId = "map", height = 600),
     br(),
     fluidRow(
-      column(4,
+      column(6,
              h4("Values at last clicked pixel"),
              tableOutput("clickTable")
       ),
-      column(4,
+      column(6,
              h4("Hummingbird subtree (this cell)"),
-             plotOutput("phyloPlot", height = 350)
-      ),
-      column(4,
+             plotOutput("phyloPlot", height = 400)
+      )
+    ),
+    br(),
+    # Full-width row: the network plot has many rotated species-name labels
+    # that need more horizontal room than a 1/3-width column can offer.
+    # Height bumped well up from the other panels -- text size in R plots
+    # is roughly fixed in absolute (point/pixel) terms, so a taller canvas
+    # means the same label occupies a smaller fraction of the [0,1] plot
+    # space, giving edge labels more room without shrinking the font.
+    fluidRow(
+      column(12,
              h4("Hummingbird - plant network (this cell)"),
-             plotOutput("networkPlot", height = 350)
+             plotOutput("networkPlot", height = 850)
       )
     )
   ),
@@ -268,6 +277,13 @@ server <- function(input, output, session) {
   # only build it once per session -- the first time the user turns it on.
   photosLoaded <- reactiveVal(FALSE)
   
+  # When a photo marker is clicked, the underlying click event also reaches
+  # the generic map click handler below. This flag lets the marker-click
+  # handler tell the map-click handler "this click was already handled by
+  # a marker -- skip the raster popup," so clicking a photo shows ONLY the
+  # photo thumbnail/info, never the raster (TD/PD/FD/network) popup.
+  suppressMapClick <- reactiveVal(FALSE)
+  
   observeEvent(input$map_groups, {
     if ("Photos" %in% input$map_groups && !photosLoaded()) {
       leafletProxy("map") |>
@@ -286,6 +302,8 @@ server <- function(input, output, session) {
   # Popup content is only ever built for the ONE marker that was clicked,
   # not pre-built for all ~150K+ markers up front.
   observeEvent(input$map_marker_click, {
+    suppressMapClick(TRUE)  # tell the map-click handler below to skip
+    
     click <- input$map_marker_click
     req(click$id)
     row <- photos_unique[photos_unique$imageFileName == click$id, ][1, ]
@@ -306,7 +324,24 @@ server <- function(input, output, session) {
   # content here, or the whole map (and its zoom/pan state) gets rebuilt
   # every time the user changes layers.
   output$map <- renderLeaflet({
-    leaflet(options = leafletOptions(worldCopyJump = FALSE)) |>
+    leaflet(options = leafletOptions(
+      worldCopyJump = FALSE,
+      # Static minZoom, set at map initialization rather than computed via
+      # JS after render -- the previous onRender()/setTimeout() approach
+      # depended on Shiny's dashboard layout having finished sizing the map
+      # container at the moment the JS ran, which proved unreliable (map
+      # was still showing the whole world in testing). A fixed value here
+      # has no such timing dependency and is guaranteed to apply. 3 keeps
+      # the Americas roughly filling the view on typical screen widths --
+      # raise to 4 if a sliver of Europe/Africa is still visible on very
+      # wide screens, or lower to 2 if it feels too zoomed-in on narrow ones.
+      minZoom = 3,
+      # Declared here too (redundant with setMaxBounds() below, which also
+      # still restricts panning) so the bound is baked into the map's
+      # initial options rather than depending on a later chained call.
+      maxBounds = list(list(-60, -170), list(85, -30)),
+      maxBoundsViscosity = 1
+    )) |>
       addProviderTiles(providers$CartoDB.Positron,
                        options = providerTileOptions(noWrap = TRUE)) |>
       
@@ -356,6 +391,13 @@ server <- function(input, output, session) {
   
   # ---- Click handler: extract ALL popup_vars at the clicked point ---------
   observeEvent(input$map_click, {
+    # A photo marker click already showed its own popup -- don't also show
+    # the raster-value popup for this same click.
+    if (isTRUE(suppressMapClick())) {
+      suppressMapClick(FALSE)
+      return(invisible(NULL))
+    }
+    
     click <- input$map_click
     pt <- terra::vect(matrix(c(click$lng, click$lat), ncol = 2),
                       type = "points", crs = "EPSG:4326")
@@ -420,10 +462,26 @@ server <- function(input, output, session) {
       plot.new()
       text(0.5, 0.5, "No high-confidence interactions (score > 0.8) in this cell")
     } else {
-      web <- table(edges$hbSpecies, edges$speciesPlant)
+      # NOTE: the earlier mar/oma attempts didn't fix the edge-label
+      # cropping because that isn't actually a spacing problem -- R clips
+      # any drawn element (including rotated text) to the plot's data
+      # region by default. A label anchored at the very first/last species'
+      # x-position genuinely extends past that boundary once rotated, and
+      # gets hard-clipped there regardless of how much blank margin exists
+      # around it. xpd=NA disables that clipping so labels can draw
+      # anywhere on the device, which is the actual fix for this.
+      op <- par(oma = c(0, 5, 0, 5), xpd = NA)
+      on.exit(par(op), add = TRUE)
+      
+      # NOTE: this bipartite version (2.20) uses the older plotweb() API --
+      # confirmed by the method="normal" argument, which only exists on the
+      # old API. On this version, "labsize" (not "text.size") is the
+      # correct label-size parameter.
+      web <- table(gsub("_", " ", edges$hbSpecies), edges$speciesPlant)
       bipartite::plotweb(web, method = "normal",
-                         col.high = "#00246B", col.low = "#009180",
-                         text.rot = 90)
+                         col.high = "#009180", col.low = "#FFC20F",
+                         text.rot = 90, labsize = 1.3,
+                         high.lablength = 20, low.lablength = 20)
     }
   })
 }

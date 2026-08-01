@@ -4,6 +4,15 @@
 .Ruserdata
 doc
 results_cache
+results/ghs_population2020
+results/worldclim_bio
+results/GHS_pop_2020.zip
+results/wc2.1_2.5m_bio.zip
+results/spei12.nc
+results/env_precip_mean_wgs84.tiff
+results/env_spei_mean_wgs84.tiff
+results/env_temp_mean_wgs84.tiff
+results/pop_2020_wgs84.tiff
 results/hb_df.parquet
 results/hb_photos_cache.rds
 results/hb_df.csv
