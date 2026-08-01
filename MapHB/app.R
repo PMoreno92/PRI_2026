@@ -132,6 +132,46 @@ selelev_mean <- load_raster("selelev_mean.tiff")
 
 message("All 11 rasters loaded and cropped successfully.")
 
+# ---- Environmental layers (2015-2024 means/totals, replacing the old live
+# FIRMS/NDVI/SPEI WMS tiles with static pre-computed rasters) --------------
+env_fire   <- load_raster("env_fire_mean_wgs84.tiff")
+env_npp    <- load_raster("env_npp_mean_wgs84.tiff")
+env_spei   <- load_raster("env_spei_mean_wgs84.tiff")
+env_temp   <- load_raster("env_temp_mean_wgs84.tiff")
+env_precip <- load_raster("env_precip_mean_wgs84.tiff")
+env_pop    <- load_raster("pop_2020_wgs84.tiff")
+
+message("All 6 environmental layers loaded and cropped successfully.")
+
+env_rasters <- list(
+  fire = env_fire, npp = env_npp, spei = env_spei,
+  temp = env_temp, precip = env_precip, pop = env_pop
+)
+
+env_labels <- c(
+  fire   = "Fire occurrence (2015-2024)",
+  npp    = "NPP mean (2015-2024)",
+  spei   = "Drought index (SPEI, 2015-2024 mean)",
+  temp   = "Mean Annual Temperature",
+  precip = "Mean Annual Precipitation",
+  pop    = "Population density (2020)"
+)
+
+env_palette_colors <- list(
+  fire   = c("#FFFFFF", "#B22222"),               # white -> firebrick red
+  npp    = c("#FFFFFF", "#1B7837"),               # white -> dark green
+  spei   = c("#A0522D", "#FFFFFF", "#1E90FF"),    # brown (dry) -> white -> blue (wet)
+  temp   = c("#2166AC", "#FFFFFF", "#B2182B"),    # blue (cold) -> white -> red (hot)
+  precip = c("#FFFFFF", "#08519C"),               # white -> dark blue
+  pop    = c("#FFFFFF", "#4B0082")                # white -> indigo
+)
+
+env_palettes <- lapply(names(env_rasters), function(v) {
+  vals <- values(env_rasters[[v]], na.rm = TRUE)
+  colorNumeric(palette = env_palette_colors[[v]], domain = vals, na.color = "transparent")
+})
+names(env_palettes) <- names(env_rasters)
+
 # ---- Photo / interaction data ---------------------------------------------
 # Now stored as Parquet on R2 (smaller + faster than the raw CSV) instead of
 # results/hb_df.csv. Still cached to .rds after the first parse per app
@@ -247,7 +287,7 @@ ui <- dashboardPage(
     fluidRow(
       column(12,
              h4("Hummingbird - plant network (this cell)"),
-             plotOutput("networkPlot", height = 850)
+             plotOutput("networkPlot", height = 650)
       )
     )
   ),
@@ -345,29 +385,29 @@ server <- function(input, output, session) {
       addProviderTiles(providers$CartoDB.Positron,
                        options = providerTileOptions(noWrap = TRUE)) |>
       
-      # NASA FIRMS (active fires)
-      addWMSTiles(baseUrl = "https://firms.modaps.eosdis.nasa.gov/mapserver/wms",
-                  layers = "fires_viirs_snpp_24",
-                  options = WMSTileOptions(format = "image/png", transparent = TRUE),
-                  attribution = "NASA FIRMS", group = "NASA FIRMS (24 h)") |>
-      
-      # NDVI
-      addWMSTiles(baseUrl = "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi",
-                  layers = "MODIS_Terra_NDVI_8Day",
-                  options = WMSTileOptions(format = "image/png", transparent = TRUE),
-                  attribution = "NASA GIBS", group = "NDVI") |>
-      
-      # CSIC SPEI
-      addWMSTiles(baseUrl = "https://spei.csic.es/geoserver/SPEI/wms",
-                  layers = "spei_latest",
-                  options = WMSTileOptions(format = "image/png", transparent = TRUE),
-                  attribution = "CSIC SPEI", group = "SPEI") |>
+      # ---- Environmental layers (static, pre-computed 2015-2024 rasters --
+      # replaces the old live FIRMS/NDVI/SPEI WMS tiles). Each gets its own
+      # toggleable overlay group and color palette.
+      addRasterImage(env_rasters$fire, colors = env_palettes$fire, opacity = 0.8,
+                     group = env_labels[["fire"]], project = TRUE) |>
+      addRasterImage(env_rasters$npp, colors = env_palettes$npp, opacity = 0.8,
+                     group = env_labels[["npp"]], project = TRUE) |>
+      addRasterImage(env_rasters$spei, colors = env_palettes$spei, opacity = 0.8,
+                     group = env_labels[["spei"]], project = TRUE) |>
+      addRasterImage(env_rasters$temp, colors = env_palettes$temp, opacity = 0.8,
+                     group = env_labels[["temp"]], project = TRUE) |>
+      addRasterImage(env_rasters$precip, colors = env_palettes$precip, opacity = 0.8,
+                     group = env_labels[["precip"]], project = TRUE) |>
+      addRasterImage(env_rasters$pop, colors = env_palettes$pop, opacity = 0.8,
+                     group = env_labels[["pop"]], project = TRUE) |>
       
       addLayersControl(
-        overlayGroups = c("Selected raster", "Photos",
-                          "NASA FIRMS (24 h)", "NDVI", "SPEI"),
+        overlayGroups = c("Selected raster", "Photos", unname(env_labels)),
         options = layersControlOptions(collapsed = FALSE)
       ) |>
+      # Start all 6 environmental layers unchecked (same as the old
+      # FIRMS/NDVI/SPEI defaults) so the map isn't cluttered on first load.
+      hideGroup(unname(env_labels)) |>
       
       # Restrict panning/zooming to the Americas
       setMaxBounds(lng1 = -170, lat1 = -60, lng2 = -30, lat2 = 85) |>
@@ -480,7 +520,7 @@ server <- function(input, output, session) {
       web <- table(gsub("_", " ", edges$hbSpecies), edges$speciesPlant)
       bipartite::plotweb(web, method = "normal",
                          col.high = "#009180", col.low = "#FFC20F",
-                         text.rot = 90, labsize = 1.3,
+                         text.rot = 90, labsize = 1.6,
                          high.lablength = 20, low.lablength = 20)
     }
   })

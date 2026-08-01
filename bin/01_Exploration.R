@@ -88,9 +88,9 @@ whem_sf = st_as_sf(world_sf)|>
 
 plot(whem_sf)
 
-whem_sf_AEAP = terra::project(whem_sf, CRS("+proj=aea +lat_1=29.5 +lat_2=45.5 +lat_0=23 +lon_0=-96 +x_0=0 
+whem_sf_AEAP = terra::project(whem_sf, crs("+proj=aea +lat_1=29.5 +lat_2=45.5 +lat_0=23 +lon_0=-96 +x_0=0 
                                  +y_0=0 +ellps=GRS80 +datum=NAD83 +units=m +no_defs")) # Transform to Albers Equal Area Projection
-whem_sf_EEA = terra::project(whem_sf, CRS("EPSG:8858")) # Transform to Equal Earth Americas
+whem_sf_EEA = terra::project(whem_sf, crs("EPSG:8858")) # Transform to Equal Earth Americas
 plot(whem_sf_EEA)
 
 
@@ -632,10 +632,8 @@ unzip("results/wc2.1_2.5m_bio.zip", exdir = "results/worldclim_bio")
 temp_raw   <- rast("results/worldclim_bio/wc2.1_2.5m_bio_1.tif")   # Annual Mean Temp
 precip_raw <- rast("results/worldclim_bio/wc2.1_2.5m_bio_12.tif")  # Annual Precip
 
-TD <- rast("results/hb_raster_qTD_est95_wgs84.tiff")  # your reference grid
-
-temp_aligned   <- resample(crop(temp_raw, ext(TD)), TD, method = "bilinear")
-precip_aligned <- resample(crop(precip_raw, ext(TD)), TD, method = "bilinear")
+temp_aligned   <- resample(crop(temp_raw, ext(selelev_mean)), selelev_mean, method = "bilinear")
+precip_aligned <- resample(crop(precip_raw, ext(selelev_mean)), selelev_mean, method = "bilinear")
 
 writeRaster(temp_aligned,   "results/env_temp_mean_wgs84.tiff",   overwrite = TRUE)
 writeRaster(precip_aligned, "results/env_precip_mean_wgs84.tiff", overwrite = TRUE)
@@ -653,7 +651,7 @@ dates <- time(spei_stack)
 idx <- which(dates >= as.Date("2015-01-01") & dates <= as.Date("2024-12-31"))
 spei_mean_raw <- mean(spei_stack[[idx]], na.rm = TRUE)
 
-spei_aligned <- resample(crop(spei_mean_raw, ext(TD)), TD, method = "bilinear")
+spei_aligned <- resample(crop(spei_mean_raw, ext(selelev_mean)), selelev_mean, method = "bilinear")
 writeRaster(spei_aligned, "results/env_spei_mean_wgs84.tiff", overwrite = TRUE)
 
 # Population 
@@ -666,6 +664,28 @@ unzip("results/GHS_pop_2020.zip", exdir = "results/ghs_population2020")
 pop_raw   <- rast("results/ghs_population2020/GHS_POP_E2020_GLOBE_R2023A_4326_30ss_V1_0.tif")  
 
 
-pop_aligned   <- resample(crop(pop_raw, ext(TD)), TD, method = "bilinear")
-
+pop_aligned   <- resample(crop(pop_raw, ext(selelev_mean)), selelev_mean, method = "bilinear")
+plot(pop_aligned)
 writeRaster(pop_aligned,   "results/pop_2020_wgs84.tiff",   overwrite = TRUE)
+
+# NPP
+# List all four tiles and mosaic them into one raster
+npp_tiles <- list.files(path = "results/",
+  pattern = "^env_npp_mean-.*\\.tif$", 
+  full.names = TRUE)
+npp_tiles 
+
+npp_list <- lapply(npp_tiles, rast)
+npp_raw <- do.call(mosaic, npp_list)  # or use merge() if mosaic() errors -- see note below
+
+plot(npp_raw)  # quick visual check that it looks like one continuous Americas raster, no gaps/seams
+
+npp_aligned <- resample(crop(npp_raw, ext(selelev_mean)), selelev_mean, method = "bilinear")
+writeRaster(npp_aligned, "results/env_npp_mean_wgs84.tiff", overwrite = TRUE)
+
+# Fire
+fire_raw = rast("results/env_fire_occurrence.tif")
+plot(fire_raw) 
+
+fire_aligned <- resample(crop(fire_raw, ext(selelev_mean)), selelev_mean, method = "bilinear")
+writeRaster(fire_aligned, "results/env_fire_mean_wgs84.tiff", overwrite = TRUE)
