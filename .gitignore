@@ -31,3 +31,4 @@ results/hb_raster_qTD_est95.tiff
 results/hb_raster_qTD_est95_wgs84.tiff
 results/selelev_mean.tiff
 .DS_Store
+MapHB/.Rprofile
