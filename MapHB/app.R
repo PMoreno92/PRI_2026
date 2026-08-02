@@ -166,9 +166,14 @@ env_palette_colors <- list(
   pop    = c("#FFFFFF", "#4B0082")                # white -> indigo
 )
 
+# Precompute each layer's non-NA cell values once; reused both as the
+# palette domain below and as this layer's legend values later, so we
+# don't re-extract potentially large rasters' full value vectors every
+# time a layer is toggled on/off in a session.
+env_values <- lapply(env_rasters, function(r) values(r, na.rm = TRUE))
+
 env_palettes <- lapply(names(env_rasters), function(v) {
-  vals <- values(env_rasters[[v]], na.rm = TRUE)
-  colorNumeric(palette = env_palette_colors[[v]], domain = vals, na.color = "transparent")
+  colorNumeric(palette = env_palette_colors[[v]], domain = env_values[[v]], na.color = "transparent")
 })
 names(env_palettes) <- names(env_rasters)
 
@@ -241,11 +246,15 @@ palette_colors <- list(
   H2          = c("#FFFFFF", "#FF571F")   # white -> orange
 )
 
+# Precompute each raster's non-NA cell values once; reused both as the
+# palette domain below and as the biological legend's values later, so we
+# don't re-extract the full value vector every time the variable changes.
+raster_values <- lapply(raster_list, function(r) values(r, na.rm = TRUE))
+
 # Precompute one colorNumeric palette function per variable (built once,
 # from the actual cell values, not from the raster object itself).
 palettes <- lapply(names(raster_list), function(v) {
-  vals <- values(raster_list[[v]], na.rm = TRUE)
-  colorNumeric(palette = palette_colors[[v]], domain = vals, na.color = "transparent")
+  colorNumeric(palette = palette_colors[[v]], domain = raster_values[[v]], na.color = "transparent")
 })
 names(palettes) <- names(raster_list)
 
@@ -317,6 +326,15 @@ server <- function(input, output, session) {
   # only build it once per session -- the first time the user turns it on.
   photosLoaded <- reactiveVal(FALSE)
   
+  # Tracks, per environmental layer, whether it has been added to the map
+  # yet. Like the photo layer above, each env raster is only rendered
+  # (including its costly project = TRUE reprojection) the first time its
+  # checkbox is actually turned on, instead of all 6 being rendered
+  # unconditionally at app startup. This keeps the first renderLeaflet()
+  # call cheap regardless of how many environmental layers exist.
+  envLoaded <- reactiveValues(fire = FALSE, npp = FALSE, spei = FALSE,
+                              temp = FALSE, precip = FALSE, pop = FALSE)
+  
   # When a photo marker is clicked, the underlying click event also reaches
   # the generic map click handler below. This flag lets the marker-click
   # handler tell the map-click handler "this click was already handled by
@@ -325,19 +343,61 @@ server <- function(input, output, session) {
   suppressMapClick <- reactiveVal(FALSE)
   
   observeEvent(input$map_groups, {
+    # ignoreInit = TRUE: only respond to the user actually checking a box.
+    # Without this, this observer would also fire once during the initial
+    # reactive flush using whatever value input$map_groups happens to hold
+    # at that moment -- which is exactly the eager-loading behavior we're
+    # trying to avoid.
     if ("Photos" %in% input$map_groups && !photosLoaded()) {
       leafletProxy("map") |>
         addCircleMarkers(
           data = photos_unique,
           lng = ~decimalLongitude, lat = ~decimalLatitude,
-          radius = 4, stroke = FALSE, fillOpacity = 0.6, fillColor = "#CC002B",
+          # Bumped from radius = 4 / stroke = FALSE: a 4px fill-only dot was
+          # a very small, low-contrast click target, making it easy to miss
+          # the marker and hit the underlying map instead (which shows the
+          # raster-value popup rather than the photo popup). A larger radius
+          # plus a thin stroke gives a bigger, more visible, easier-to-hit
+          # target without changing the map's overall visual weight.
+          radius = 7, stroke = TRUE, weight = 1, color = "#7A0019",
+          fillOpacity = 0.75, fillColor = "#CC002B",
           clusterOptions = markerClusterOptions(),
           group = "Photos",
           layerId = ~imageFileName  # used to look up the row on click, below
         )
       photosLoaded(TRUE)
     }
-  })
+    
+    # Lazily add each environmental raster the first time its group name
+    # appears in the checked overlay list, and keep that layer's legend
+    # (bottom-right) in sync with its checkbox state on every toggle. The
+    # raster itself only needs to be added once -- Leaflet's own layer
+    # control automatically shows/hides it after that -- but the legend
+    # isn't tied to group visibility automatically, so it has to be
+    # explicitly added/removed here each time the box is checked/unchecked.
+    for (v in names(env_rasters)) {
+      lbl <- env_labels[[v]]
+      legend_id <- paste0("envLegend_", v)
+      checked <- lbl %in% input$map_groups
+      
+      if (checked) {
+        if (!envLoaded[[v]]) {
+          leafletProxy("map") |>
+            addRasterImage(env_rasters[[v]], colors = env_palettes[[v]], opacity = 0.8,
+                           group = lbl, project = TRUE)
+          envLoaded[[v]] <- TRUE
+        }
+        # addLegend() with an existing layerId replaces that control in
+        # place, so calling this every time is safe and won't stack
+        # duplicate legends.
+        leafletProxy("map") |>
+          addLegend(position = "bottomright", pal = env_palettes[[v]],
+                    values = env_values[[v]], title = lbl, layerId = legend_id)
+      } else if (envLoaded[[v]]) {
+        leafletProxy("map") |> removeControl(layerId = legend_id)
+      }
+    }
+  }, ignoreInit = TRUE)
   
   # Popup content is only ever built for the ONE marker that was clicked,
   # not pre-built for all ~150K+ markers up front.
@@ -386,28 +446,27 @@ server <- function(input, output, session) {
                        options = providerTileOptions(noWrap = TRUE)) |>
       
       # ---- Environmental layers (static, pre-computed 2015-2024 rasters --
-      # replaces the old live FIRMS/NDVI/SPEI WMS tiles). Each gets its own
-      # toggleable overlay group and color palette.
-      addRasterImage(env_rasters$fire, colors = env_palettes$fire, opacity = 0.8,
-                     group = env_labels[["fire"]], project = TRUE) |>
-      addRasterImage(env_rasters$npp, colors = env_palettes$npp, opacity = 0.8,
-                     group = env_labels[["npp"]], project = TRUE) |>
-      addRasterImage(env_rasters$spei, colors = env_palettes$spei, opacity = 0.8,
-                     group = env_labels[["spei"]], project = TRUE) |>
-      addRasterImage(env_rasters$temp, colors = env_palettes$temp, opacity = 0.8,
-                     group = env_labels[["temp"]], project = TRUE) |>
-      addRasterImage(env_rasters$precip, colors = env_palettes$precip, opacity = 0.8,
-                     group = env_labels[["precip"]], project = TRUE) |>
-      addRasterImage(env_rasters$pop, colors = env_palettes$pop, opacity = 0.8,
-                     group = env_labels[["pop"]], project = TRUE) |>
-      
+      # replaces the old live FIRMS/NDVI/SPEI WMS tiles). Each is NOT added
+      # here anymore -- they start unchecked, and are lazily added (with
+      # their project = TRUE reprojection) only when the user actually
+      # checks the corresponding box, via the observeEvent(input$map_groups)
+      # handler above. This keeps first-render cost independent of how many
+      # environmental layers exist, without changing anything the user sees:
+      # the checkboxes below still list all 6, still start unchecked, and
+      # still show identical data once toggled on.
       addLayersControl(
         overlayGroups = c("Selected raster", "Photos", unname(env_labels)),
         options = layersControlOptions(collapsed = FALSE)
       ) |>
-      # Start all 6 environmental layers unchecked (same as the old
-      # FIRMS/NDVI/SPEI defaults) so the map isn't cluttered on first load.
-      hideGroup(unname(env_labels)) |>
+      # Without an actual layer added yet, Leaflet's control still defaults
+      # these checkboxes to "checked" unless explicitly told otherwise --
+      # this hideGroup() call is what makes them render unchecked at
+      # startup (matching reality: nothing has been added for them yet).
+      # This also matters functionally, not just visually: an unchecked
+      # box means input$map_groups won't list these groups on the initial
+      # reactive flush, so the lazy-load observer below won't mistakenly
+      # fire for all of them at once during startup.
+      hideGroup(c("Photos", unname(env_labels))) |>
       
       # Restrict panning/zooming to the Americas
       setMaxBounds(lng1 = -170, lat1 = -60, lng2 = -30, lat2 = 85) |>
@@ -422,11 +481,16 @@ server <- function(input, output, session) {
     
     leafletProxy("map") |>
       clearGroup("Selected raster") |>
-      clearControls() |>
       addRasterImage(r, colors = pal, opacity = 0.8, group = "Selected raster",
                      project = TRUE) |>
-      addLegend(position = "bottomright", pal = pal, values = values(r, na.rm = TRUE),
-                title = names(which(variable_choices == input$variable)))
+      # Bottom-left, kept separate from the environmental legends (bottom-
+      # right, added/removed in the map_groups observer above) so both can
+      # be visible at once. Uses a fixed layerId so each call replaces the
+      # previous bio legend in place instead of stacking duplicates -- and
+      # no longer calls clearControls(), which would also have wiped out
+      # any currently-active environmental legends.
+      addLegend(position = "bottomleft", pal = pal, values = raster_values[[input$variable]],
+                title = names(which(variable_choices == input$variable)), layerId = "bioLegend")
   }, ignoreNULL = TRUE)
   
   # ---- Click handler: extract ALL popup_vars at the clicked point ---------
@@ -447,12 +511,26 @@ server <- function(input, output, session) {
       if (is.null(out) || length(out) == 0) NA else round(out, 3)
     })
     
-    clickValues(data.frame(
-      Variable = popup_labels[popup_vars],
-      Value = vals,
-      row.names = NULL
+    # Same extraction, for the environmental layers, appended below the
+    # biological variables in the same clickTable box. Extracted for all
+    # 6 env layers regardless of which are currently toggled visible on
+    # the map -- the click table is a data summary independent of what's
+    # drawn, same as it already was for the biological variables.
+    env_vals <- sapply(names(env_rasters), function(v) {
+      out <- terra::extract(env_rasters[[v]], pt)[1, 2]
+      if (is.null(out) || length(out) == 0) NA else round(out, 3)
+    })
+    
+    clickValues(rbind(
+      data.frame(Variable = popup_labels[popup_vars], Value = vals, row.names = NULL),
+      data.frame(Variable = "\u2014 Environmental variables \u2014", Value = NA, row.names = NULL),
+      data.frame(Variable = env_labels[names(env_rasters)], Value = env_vals, row.names = NULL)
     ))
     
+    # The on-map popup bubble still shows only the biological variables,
+    # to keep it from becoming a 13-line wall of text right on the map --
+    # the full set (biological + environmental) is available just below
+    # in the clickTable box. Easy to extend to the popup too if wanted.
     popup_html <- paste0(
       "<b>", popup_labels[popup_vars], ":</b> ", vals, collapse = "<br/>"
     )
